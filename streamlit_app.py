@@ -221,6 +221,11 @@ def main() -> None:
         value=5,
         step=1,
     )
+    # Initialise session state to persist fetched data across reruns
+    if "df" not in st.session_state:
+        st.session_state["df"] = None
+
+    # When the button is clicked, fetch and store the dataframe
     if st.button("Fetch option prices"):
         if not api_key:
             st.error(
@@ -231,64 +236,73 @@ def main() -> None:
                 contracts, error = fetch_contracts(ticker_input, int(limit), api_key)
             if error:
                 st.error(error)
+                st.session_state["df"] = None
             elif not contracts:
                 st.warning("No contracts found for the specified underlying ticker.")
+                st.session_state["df"] = None
             else:
-                df = build_dataframe(contracts, api_key)
-                # Normalize option types to lowercase for filtering
-                df["Type"] = df["Type"].str.lower()
-                # Allow the user to filter option types (call or put)
-                option_types = st.multiselect(
-                    "Filter by option type",
-                    options=["call", "put"],
-                    default=["call", "put"],
-                )
-                df_filtered = df[df["Type"].isin(option_types)].copy()
-                # Determine the range for the premium slider using the numeric Premium column
-                valid_premiums = df_filtered["Premium"].dropna()
-                if not valid_premiums.empty:
-                    min_price = float(valid_premiums.min())
-                    max_price = float(valid_premiums.max())
-                else:
-                    min_price = 0.0
-                    max_price = 0.0
-                price_min, price_max = st.slider(
-                    "Filter by premium",
-                    min_value=min_price,
-                    max_value=max_price,
-                    value=(min_price, max_price),
-                )
-                # Apply the selected premium range filters
-                df_filtered = df_filtered[
-                    (df_filtered["Premium"].fillna(0) >= price_min) &
-                    (df_filtered["Premium"].fillna(0) <= price_max)
-                ].copy()
-                # Build a display-friendly Premium string with ' C' suffix if using previous close
-                def format_premium(value: Optional[float], source: str) -> Optional[str]:
-                    if value is None:
-                        return None
-                    return f"{value} C" if source == "close" else f"{value}"
+                df_new = build_dataframe(contracts, api_key)
+                st.session_state["df"] = df_new
 
-                df_filtered["PremiumDisplay"] = df_filtered.apply(
-                    lambda row: format_premium(row["Premium"], row["PremiumSource"]),
-                    axis=1,
-                )
-                # Display the filtered data with relevant columns
-                display_cols = [
-                    "Option Ticker",
-                    "Type",
-                    "Strike",
-                    "Expiration",
-                    "PremiumDisplay",
-                    "PremiumSource",
-                    "Open",
-                    "High",
-                    "Low",
-                ]
-                st.dataframe(
-                    df_filtered[display_cols].rename(columns={"PremiumDisplay": "Premium"}),
-                    use_container_width=True,
-                )
+    # If we have data in session state, display filters and table
+    df = st.session_state.get("df")
+    if df is not None:
+        # Normalize option types to lowercase for filtering
+        df_display = df.copy()
+        df_display["Type"] = df_display["Type"].str.lower()
+        # Allow the user to filter option types (call or put)
+        option_types = st.multiselect(
+            "Filter by option type",
+            options=["call", "put"],
+            default=["call", "put"],
+        )
+        df_filtered = df_display[df_display["Type"].isin(option_types)].copy()
+        # Determine the range for the premium slider using the numeric Premium column
+        valid_premiums = df_filtered["Premium"].dropna()
+        if not valid_premiums.empty:
+            min_price = float(valid_premiums.min())
+            max_price = float(valid_premiums.max())
+        else:
+            min_price = 0.0
+            max_price = 0.0
+        price_min, price_max = st.slider(
+            "Filter by premium",
+            min_value=min_price,
+            max_value=max_price,
+            value=(min_price, max_price),
+            step=(max_price - min_price) / 100 if max_price > min_price else 1.0,
+        )
+        # Apply the selected premium range filters
+        df_filtered = df_filtered[
+            (df_filtered["Premium"].fillna(0) >= price_min) &
+            (df_filtered["Premium"].fillna(0) <= price_max)
+        ].copy()
+        # Build a display-friendly Premium string with ' C' suffix if using previous close
+        def format_premium(value: Optional[float], source: str) -> Optional[str]:
+            if value is None:
+                return None
+            return f"{value} C" if source == "close" else f"{value}"
+
+        df_filtered["PremiumDisplay"] = df_filtered.apply(
+            lambda row: format_premium(row["Premium"], row["PremiumSource"]),
+            axis=1,
+        )
+        # Display the filtered data with relevant columns
+        display_cols = [
+            "Option Ticker",
+            "Type",
+            "Strike",
+            "Expiration",
+            "PremiumDisplay",
+            "PremiumSource",
+            "Open",
+            "High",
+            "Low",
+        ]
+        st.dataframe(
+            df_filtered[display_cols].rename(columns={"PremiumDisplay": "Premium"}),
+            use_container_width=True,
+        )
 
 
 if __name__ == "__main__":
