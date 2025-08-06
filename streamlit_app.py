@@ -101,8 +101,54 @@ def fetch_prev_agg(option_ticker: str, api_key: str) -> Optional[Dict]:
     return results[0] if results else None
 
 
+def fetch_last_trade(option_ticker: str, api_key: str) -> Optional[float]:
+    """Fetch the most recent trade price for a specific option ticker.
+
+    The Polygon trades endpoint returns individual trades for an instrument. This
+    helper retrieves the latest trade (if any) and extracts the price. If
+    trading is halted or the market is closed, the endpoint may return no
+    results, in which case ``None`` is returned.
+
+    Parameters
+    ----------
+    option_ticker : str
+        The full option ticker (e.g., ``O:AAPL240816C00180000``).
+    api_key : str
+        The Polygon API key.
+
+    Returns
+    -------
+    Optional[float]
+        The latest traded price if available, otherwise ``None``.
+    """
+    url = f"https://api.polygon.io/v3/trades/{option_ticker}"
+    params = {
+        "limit": 1,
+        "apiKey": api_key,
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+    except requests.RequestException:
+        return None
+    if resp.status_code != 200:
+        return None
+    data = resp.json().get("results", [])
+    if not data:
+        return None
+    trade = data[0]
+    # Trades responses may use "p" (price) or "price" depending on the API version
+    price = trade.get("p") or trade.get("price")
+    return float(price) if price is not None else None
+
+
 def build_dataframe(contracts: List[Dict], api_key: str) -> pd.DataFrame:
     """Construct a pandas DataFrame combining contract metadata with price data.
+
+    This function enriches each option contract with both the most recent trade
+    price (if available) and the previous day's OHLC values. The returned
+    DataFrame includes numeric premium values for filtering and a source flag
+    indicating whether the premium comes from real‑time data or the previous
+    close.
 
     Parameters
     ----------
@@ -115,21 +161,35 @@ def build_dataframe(contracts: List[Dict], api_key: str) -> pd.DataFrame:
     -------
     pd.DataFrame
         A DataFrame with columns for ticker, contract type, strike price,
-        expiration date, and previous day's OHLC values.
+        expiration date, previous day's OHLC values, a numeric premium and
+        a premium source indicator.
     """
     rows = []
     for contract in contracts:
         ticker = contract.get("ticker")
+        # Fetch previous day's aggregated data
         prev = fetch_prev_agg(ticker, api_key)
+        # Fetch the latest trade price; may return None if no trade is available
+        last_price = fetch_last_trade(ticker, api_key)
+        # Determine the premium: use real‑time price if available, otherwise fall back to previous close
+        close_price = prev.get("c") if prev else None
+        if last_price is not None:
+            premium_value = last_price
+            premium_source = "real"
+        else:
+            premium_value = close_price
+            premium_source = "close"
         row = {
             "Option Ticker": ticker,
             "Type": contract.get("contract_type"),
             "Strike": contract.get("strike_price"),
             "Expiration": contract.get("expiration_date"),
-            "Close": prev.get("c") if prev else None,
+            "Close": close_price,
             "Open": prev.get("o") if prev else None,
             "High": prev.get("h") if prev else None,
             "Low": prev.get("l") if prev else None,
+            "Premium": premium_value,
+            "PremiumSource": premium_source,
         }
         rows.append(row)
     return pd.DataFrame(rows)
@@ -175,7 +235,60 @@ def main() -> None:
                 st.warning("No contracts found for the specified underlying ticker.")
             else:
                 df = build_dataframe(contracts, api_key)
-                st.dataframe(df, use_container_width=True)
+                # Normalize option types to lowercase for filtering
+                df["Type"] = df["Type"].str.lower()
+                # Allow the user to filter option types (call or put)
+                option_types = st.multiselect(
+                    "Filter by option type",
+                    options=["call", "put"],
+                    default=["call", "put"],
+                )
+                df_filtered = df[df["Type"].isin(option_types)].copy()
+                # Determine the range for the premium slider using the numeric Premium column
+                valid_premiums = df_filtered["Premium"].dropna()
+                if not valid_premiums.empty:
+                    min_price = float(valid_premiums.min())
+                    max_price = float(valid_premiums.max())
+                else:
+                    min_price = 0.0
+                    max_price = 0.0
+                price_min, price_max = st.slider(
+                    "Filter by premium",
+                    min_value=min_price,
+                    max_value=max_price,
+                    value=(min_price, max_price),
+                )
+                # Apply the selected premium range filters
+                df_filtered = df_filtered[
+                    (df_filtered["Premium"].fillna(0) >= price_min) &
+                    (df_filtered["Premium"].fillna(0) <= price_max)
+                ].copy()
+                # Build a display-friendly Premium string with ' C' suffix if using previous close
+                def format_premium(value: Optional[float], source: str) -> Optional[str]:
+                    if value is None:
+                        return None
+                    return f"{value} C" if source == "close" else f"{value}"
+
+                df_filtered["PremiumDisplay"] = df_filtered.apply(
+                    lambda row: format_premium(row["Premium"], row["PremiumSource"]),
+                    axis=1,
+                )
+                # Display the filtered data with relevant columns
+                display_cols = [
+                    "Option Ticker",
+                    "Type",
+                    "Strike",
+                    "Expiration",
+                    "PremiumDisplay",
+                    "PremiumSource",
+                    "Open",
+                    "High",
+                    "Low",
+                ]
+                st.dataframe(
+                    df_filtered[display_cols].rename(columns={"PremiumDisplay": "Premium"}),
+                    use_container_width=True,
+                )
 
 
 if __name__ == "__main__":
